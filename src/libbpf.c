@@ -11674,13 +11674,18 @@ static const char *tracefs_available_filter_functions_addrs(void)
 }
 
 static void gen_probe_legacy_event_name(char *buf, size_t buf_sz,
-					const char *name, size_t offset)
+					const char *name, size_t offset,
+					const char *session_tag)
 {
 	static int index = 0;
 	int i;
 
-	snprintf(buf, buf_sz, "libbpf_%u_%d_%s_0x%zx", getpid(),
-		 __sync_fetch_and_add(&index, 1), name, offset);
+	if (session_tag && session_tag[0])
+		snprintf(buf, buf_sz, "libbpf_%s_%d_%s_0x%zx", session_tag,
+			 __sync_fetch_and_add(&index, 1), name, offset);
+	else
+		snprintf(buf, buf_sz, "libbpf_%u_%d_%s_0x%zx", getpid(),
+			 __sync_fetch_and_add(&index, 1), name, offset);
 
 	/* sanitize name in the probe name */
 	for (i = 0; buf[i]; i++) {
@@ -11708,6 +11713,48 @@ static int remove_kprobe_event_legacy(const char *probe_name, bool retprobe)
 {
 	return append_to_file(tracefs_kprobe_events(), "-:%s/%s",
 			      retprobe ? "kretprobes" : "kprobes", probe_name);
+}
+
+int libbpf_cleanup_kprobe_legacy(const char *session_tag)
+{
+	char buf[4096], probe_name[256], prefix[256];
+	bool is_retprobe;
+	int removed = 0;
+	FILE *f;
+	char *p;
+
+	if (!session_tag || !session_tag[0])
+		return libbpf_err(-EINVAL);
+
+	snprintf(prefix, sizeof(prefix), "libbpf_%s_", session_tag);
+
+	f = fopen(tracefs_kprobe_events(), "r");
+	if (!f)
+		return libbpf_err(-errno);
+
+	while (fgets(buf, sizeof(buf), f)) {
+		/* format: p:kprobes/probe_name func+0x0 or r:kretprobes/probe_name func+0x0 */
+		is_retprobe = (buf[0] == 'r');
+
+		p = strchr(buf, '/');
+		if (!p)
+			continue;
+		p++;
+
+		/* extract probe name (until space or newline) */
+		if (sscanf(p, "%255[^ \t\n]", probe_name) != 1)
+			continue;
+
+		/* check if probe matches our session tag prefix */
+		if (strncmp(probe_name, prefix, strlen(prefix)) != 0)
+			continue;
+
+		if (remove_kprobe_event_legacy(probe_name, is_retprobe) == 0)
+			removed++;
+	}
+
+	fclose(f);
+	return removed;
 }
 
 static int determine_kprobe_perf_type_legacy(const char *probe_name, bool retprobe)
@@ -11814,7 +11861,7 @@ int probe_kern_syscall_wrapper(int token_fd)
 	} else { /* legacy mode */
 		char probe_name[MAX_EVENT_NAME_LEN];
 
-		gen_probe_legacy_event_name(probe_name, sizeof(probe_name), syscall_name, 0);
+		gen_probe_legacy_event_name(probe_name, sizeof(probe_name), syscall_name, 0, NULL);
 		if (add_kprobe_event_legacy(probe_name, false, syscall_name, 0, 0) < 0)
 			return 0;
 
@@ -11831,6 +11878,7 @@ bpf_program__attach_kprobe_opts(const struct bpf_program *prog,
 	DECLARE_LIBBPF_OPTS(bpf_perf_event_opts, pe_opts);
 	enum probe_attach_mode attach_mode;
 	char *legacy_probe = NULL;
+	const char *session_tag;
 	struct bpf_link *link;
 	size_t offset;
 	bool retprobe, legacy;
@@ -11843,6 +11891,7 @@ bpf_program__attach_kprobe_opts(const struct bpf_program *prog,
 	retprobe = OPTS_GET(opts, retprobe, false);
 	offset = OPTS_GET(opts, offset, 0);
 	maxactive = OPTS_GET(opts, maxactive, 0);
+	session_tag = OPTS_GET(opts, session_tag, NULL);
 	pe_opts.bpf_cookie = OPTS_GET(opts, bpf_cookie, 0);
 
 	legacy = determine_kprobe_perf_type() < 0;
@@ -11876,7 +11925,7 @@ bpf_program__attach_kprobe_opts(const struct bpf_program *prog,
 		char probe_name[MAX_EVENT_NAME_LEN];
 
 		gen_probe_legacy_event_name(probe_name, sizeof(probe_name),
-					    func_name, offset);
+					    func_name, offset, session_tag);
 
 		legacy_probe = strdup(probe_name);
 		if (!legacy_probe)
@@ -12873,7 +12922,7 @@ bpf_program__attach_uprobe_opts(const struct bpf_program *prog, pid_t pid,
 
 		gen_probe_legacy_event_name(probe_name, sizeof(probe_name),
 					    strrchr(binary_path, '/') ? : binary_path,
-					    func_offset);
+					    func_offset, NULL);
 
 		legacy_probe = strdup(probe_name);
 		if (!legacy_probe)
