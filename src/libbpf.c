@@ -11681,8 +11681,8 @@ static void gen_probe_legacy_event_name(char *buf, size_t buf_sz,
 	int i;
 
 	if (session_tag && session_tag[0])
-		snprintf(buf, buf_sz, "libbpf_%s_%d_%s_0x%zx", session_tag,
-			 __sync_fetch_and_add(&index, 1), name, offset);
+		snprintf(buf, buf_sz, "libbpf_%s_%u_%d_%s_0x%zx", session_tag,
+			 getpid(), __sync_fetch_and_add(&index, 1), name, offset);
 	else
 		snprintf(buf, buf_sz, "libbpf_%u_%d_%s_0x%zx", getpid(),
 			 __sync_fetch_and_add(&index, 1), name, offset);
